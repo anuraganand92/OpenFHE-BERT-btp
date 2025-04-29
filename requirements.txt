@@ -1,0 +1,8 @@
+# Core dependencies
+numpy>=1.21
+torch>=1.12
+transformers>=4.20
+openfhe>=0.8.10
+
+# (Optional) Needed if you build the Python wrapper from source
+pybind11>=2.10
