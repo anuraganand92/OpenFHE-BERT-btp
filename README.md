@@ -1,4 +1,4 @@
-# Secure BERT with OpenFHE
+# Securing Transformer Models using Fully Homomorphic Encryption
 
 This repository demonstrates how to perform homomorphic encryption on a BERT‑Tiny embedding using the OpenFHE (Boolean) Python wrapper. The example encrypts a sentence embedding, applies a secure dot‑product with random weights and bias, and decrypts the result.
 
