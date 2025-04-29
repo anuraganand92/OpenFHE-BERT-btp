@@ -65,15 +65,16 @@ pip install -r requirements.txt
 ## 4. Usage
 
 ```bash
-# Run inference on a custom sentence
-python fhe_bert.py "This is a secure inference test."
+# Run on a custom sentence
+# Add desired sentence to be tested by changing sentence in line 178
+python openfhe_bert.py
 ```
 
 Expected output:
 ```
 [INFO] Plaintext BERT‑Tiny embedding…
 [INFO] Setting up BinFHE…
-[INFO] Homomorphic dot‑product ( 768 dimensions)…
+[INFO] Homomorphic dot‑product ( 128 dimensions)…
 Encrypted output int : <integer>
 De‑quantised value  : <float>
 Prediction          : positive|negative
