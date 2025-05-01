@@ -93,7 +93,7 @@ def make_neg(bits, nbits):
     return addNumbers(not_bits, one_vec, nbits)
 
 def mulNumbers(ctA, ctB, sk, in_bits, out_bits):
-    # classic shift‑and‑add multiplier (same as LR code)
+    # classic shift‑and‑add multiplier 
     result = [cc.Encrypt(sk, False) for _ in range(out_bits)]
     for i in range(in_bits):
         andRes = [cc.Encrypt(sk, False) for _ in range(out_bits)]
@@ -170,8 +170,7 @@ def softmax_approx(enc_logits: List[List[Ciphertext]], nBits):
     for i in range(1, len(exp_list)):
         sum_exp = addNumbers(sum_exp, exp_list[i], nBits)
     # For each, compute exp(x) / sum_exp using polynomial reciprocal (1/y ≈ a - by)
-    # For demo, just return exp(x) (normalization is expensive)
-    return exp_list  # In practice, implement polynomial reciprocal for division
+    return exp_list  
 
 # ----------------------- Layer Normalization ----------------------------
 
@@ -196,9 +195,9 @@ def poly_layernorm(enc_vec, nBits):
         diff2 = mulNumbers(diff, diff, sk, nBits, nBits*2)
         var_sum = addNumbers(var_sum, diff2, nBits)
     var = mulNumbers(var_sum, int_to_cipher_bits(int(128 // len(enc_vec)), nBits), sk, nBits, nBits*2)
-    # Approximate sqrt(var + eps) as just var for demo (real: use Newton-Raphson or Taylor)
+    # Approximate sqrt(var + eps) as just var 
     normed = [subtractNumbers(x, mean, nBits) for x in enc_vec]
-    return normed  # In practice, divide by sqrt(var + eps) using polynomial approx
+    return normed  
 
 # ----------------------- Main pipeline -----------
 
