@@ -6,7 +6,6 @@ import numpy as np
 import torch
 from transformers import AutoTokenizer, AutoModel
 
-# ────────────────────────────  OpenFHE (Boolean)  ────────────────────────────
 from openfhe import *  # BinFHEContext, gate enums, …
 
 # ----------------------------- Bit‑helpers -----------------------------------
@@ -15,20 +14,18 @@ def twos_complement_bits(val: int, nbits: int) -> List[bool]:
     """Return *nbits* MSB‑first Boolean list for signed *val*."""
     return [bool((val >> (nbits - 1 - i)) & 1) for i in range(nbits)]
 
-
 def bits_to_int(bits: List[int]) -> int:
     out = 0
     for b in bits:
         out = (out << 1) | b
     return out
 
-
 def twos_comp_val(val: int, bits: int) -> int:
     if val & (1 << bits - 1):
         val -= 1 << bits
     return val
 
-# --------------------- Gate‑level arithmetic (copied from LR) ----------------
+# --------------------- Gate‑level arithmetic ----------------
 
 def subtractBits(r, a, b, carry):
     t1 = cc.EvalBinGate(XOR, a, b)
@@ -39,7 +36,6 @@ def subtractBits(r, a, b, carry):
     t3 = cc.EvalBinGate(AND, abcomp, carry)
     r[1] = cc.EvalBinGate(OR, t2, t3)
     return r
-
 
 def subtractNumbers(ctA, ctB, nBits):
     ctRes = [False] * nBits
@@ -53,13 +49,11 @@ def subtractNumbers(ctA, ctB, nBits):
         carry = bitResult[1]
     return ctRes
 
-
 def approaddBits(r, a, b, carry):
     r[1] = cc.EvalBinGate(OR, a, b)
     temp = cc.EvalBinGate(AND, a, b)
     r[0] = cc.EvalBinGate(OR, carry, temp)
     return r
-
 
 def addBits(r, a, b, carry):
     t1 = cc.EvalBinGate(XOR, a, b)
@@ -70,7 +64,6 @@ def addBits(r, a, b, carry):
     t5 = cc.EvalBinGate(OR, t2, t3)
     r[1] = cc.EvalBinGate(OR, t5, t4)
     return r
-
 
 def addNumbers(ctA, ctB, nBits):
     ctRes = [False] * nBits
@@ -86,7 +79,6 @@ def addNumbers(ctA, ctB, nBits):
         carry = bitResult[1]
     return ctRes
 
-
 def mux(c_s, true, false):
     temp1 = cc.EvalBinGate(NAND, c_s, true)
     temp1_and = cc.EvalNOT(temp1)
@@ -94,13 +86,11 @@ def mux(c_s, true, false):
     temp2_and = cc.EvalNOT(temp2)
     return cc.EvalBinGate(OR, temp1_and, temp2_and)
 
-
 def make_neg(bits, nbits):
     one = cc.Encrypt(sk, True)
     one_vec = [cc.Encrypt(sk, False) if i else one for i in range(nbits)]
     not_bits = [cc.EvalNOT(b) for b in bits]
     return addNumbers(not_bits, one_vec, nbits)
-
 
 def mulNumbers(ctA, ctB, sk, in_bits, out_bits):
     # classic shift‑and‑add multiplier (same as LR code)
@@ -118,11 +108,99 @@ def mulNumbers(ctA, ctB, sk, in_bits, out_bits):
 def int_to_cipher_bits(val: int, nbits: int) -> List[Ciphertext]:
     return [cc.Encrypt(sk, bit) for bit in twos_complement_bits(val, nbits)]
 
-
 def cipher_bits_to_int(bits: List[Ciphertext]) -> int:
     plain = [int(cc.Decrypt(sk, b)) for b in bits]
     return twos_comp_val(bits_to_int(plain), len(bits))
 
+# ----------------------- Matrix Multiplication --------------------------
+
+def matmul(enc_A, enc_B, nBits):
+    # enc_A: List[List[List[Ciphertext]]] (m x k x nBits)
+    # enc_B: List[List[List[Ciphertext]]] (k x n x nBits)
+    m, k, n = len(enc_A), len(enc_A[0]), len(enc_B[0])
+    enc_C = []
+    for i in range(m):
+        row = []
+        for j in range(n):
+            # Compute dot product of enc_A[i] and column enc_B[:,j]
+            products = [mulNumbers(enc_A[i][l], enc_B[l][j], sk, nBits, nBits*2) for l in range(k)]
+            # Tree-sum as in your code
+            while len(products) > 1:
+                a = products.pop()
+                b = products.pop()
+                products.append(addNumbers(a, b, nBits))
+            row.append(products[0])
+        enc_C.append(row)
+    return enc_C
+
+# ----------------------- Polynomial Activation (GELU approx) ------------
+
+def poly_gelu(bits, nBits):
+    # Approximate GELU(x) ≈ 0.5x + 0.197x^3 (scaled for integer domain)
+    # For FHE, use only add/mul
+    # x^3 = x * x * x
+    x = bits
+    x2 = mulNumbers(x, x, sk, nBits, nBits*2)
+    x3 = mulNumbers(x2, x, sk, nBits, nBits*2)
+    # scale factors: 0.5 and 0.197 (approx 0.2)
+    # For fixed-point, multiply by scale (e.g., 128), so 0.5*128=64, 0.2*128=26
+    # y = 0.5x + 0.2x^3
+    half_x = mulNumbers(x, int_to_cipher_bits(64, nBits), sk, nBits, nBits*2)
+    cubic_x = mulNumbers(x3, int_to_cipher_bits(26, nBits), sk, nBits, nBits*2)
+    y = addNumbers(half_x, cubic_x, nBits)
+    # Optionally, shift right by 7 bits to divide by 128 (simulate fixed-point scaling)
+    return y
+
+# ----------------------- Softmax Approximation --------------------------
+
+def poly_exp(bits, nBits):
+    # Approximate exp(x) ≈ 1 + x + 0.5x^2 (for small x, Taylor expansion)
+    one = int_to_cipher_bits(128, nBits)  # 1.0 in fixed-point (scale=128)
+    x = bits
+    x2 = mulNumbers(x, x, sk, nBits, nBits*2)
+    half_x2 = mulNumbers(x2, int_to_cipher_bits(64, nBits), sk, nBits, nBits*2)
+    temp = addNumbers(one, x, nBits)
+    return addNumbers(temp, half_x2, nBits)
+
+def softmax_approx(enc_logits: List[List[Ciphertext]], nBits):
+    # enc_logits: list of encrypted numbers (logits)
+    exp_list = [poly_exp(x, nBits) for x in enc_logits]
+    # Sum all exp(x)
+    sum_exp = exp_list[0]
+    for i in range(1, len(exp_list)):
+        sum_exp = addNumbers(sum_exp, exp_list[i], nBits)
+    # For each, compute exp(x) / sum_exp using polynomial reciprocal (1/y ≈ a - by)
+    # For demo, just return exp(x) (normalization is expensive)
+    return exp_list  # In practice, implement polynomial reciprocal for division
+
+# ----------------------- Layer Normalization ----------------------------
+
+def poly_mean(enc_vec, nBits):
+    # Mean = sum(x_i) / N, use polynomial reciprocal for 1/N
+    N = len(enc_vec)
+    sum_vec = enc_vec[0]
+    for i in range(1, N):
+        sum_vec = addNumbers(sum_vec, enc_vec[i], nBits)
+    # Multiply by reciprocal of N (for N=4, reciprocal=0.25*128=32)
+    recip = int_to_cipher_bits(int(128 // N), nBits)
+    mean = mulNumbers(sum_vec, recip, sk, nBits, nBits*2)
+    return mean
+
+def poly_layernorm(enc_vec, nBits):
+    # Normalize x_i: (x_i - mean) / sqrt(var + eps)
+    mean = poly_mean(enc_vec, nBits)
+    # Compute variance: mean((x_i - mean)^2)
+    var_sum = [cc.Encrypt(sk, False) for _ in range(nBits)]
+    for x in enc_vec:
+        diff = subtractNumbers(x, mean, nBits)
+        diff2 = mulNumbers(diff, diff, sk, nBits, nBits*2)
+        var_sum = addNumbers(var_sum, diff2, nBits)
+    var = mulNumbers(var_sum, int_to_cipher_bits(int(128 // len(enc_vec)), nBits), sk, nBits, nBits*2)
+    # Approximate sqrt(var + eps) as just var for demo (real: use Newton-Raphson or Taylor)
+    normed = [subtractNumbers(x, mean, nBits) for x in enc_vec]
+    return normed  # In practice, divide by sqrt(var + eps) using polynomial approx
+
+# ----------------------- Main pipeline -----------
 
 def main(sentence: str):
     print("[INFO] Plaintext BERT‑Tiny embedding…")
@@ -165,7 +243,10 @@ def main(sentence: str):
     y_bits = addNumbers(products[0], enc_b, nbits)
     enc_time = time.time() - t0
 
-    y_int = cipher_bits_to_int(y_bits)
+    # Apply activation (GELU approx)
+    y_bits_gelu = poly_gelu(y_bits, nbits)
+
+    y_int = cipher_bits_to_int(y_bits_gelu)
     y_float = y_int / (SCALE ** 2)
 
     print(f"Encrypted output int : {y_int}")
