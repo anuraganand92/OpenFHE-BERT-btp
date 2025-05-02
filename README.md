@@ -66,7 +66,7 @@ pip install -r requirements.txt
 
 ```bash
 # Run on a custom sentence
-# Add desired sentence to be tested by changing sentence in line 254
+# Add desired sentence to be tested by changing sentence in line 260
 python openfhe_bert.py
 ```
 
