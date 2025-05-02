@@ -108,6 +108,12 @@ def cipher_bits_to_int(bits: List[Ciphertext]) -> int:
     plain = [int(cc.Decrypt(sk, b)) for b in bits]
     return twos_comp_val(bits_to_int(plain), len(bits))
 
+# ----------------------- FHE ciphertext copy helper --------------------------
+
+def copy_cipher_bits(bits):
+    # Decrypt and re-encrypt to create independent ciphertexts
+    return [cc.Encrypt(sk, int(cc.Decrypt(sk, b))) for b in bits]
+
 # ----------------------- Matrix Multiplication -------------------------------
 
 def matmul(enc_A, enc_B, nBits):
@@ -130,8 +136,8 @@ def matmul(enc_A, enc_B, nBits):
 def poly_gelu(bits, nBits):
     # GELU(x) ≈ 0.5x + 0.2x^3, fixed-point scale=128
     x = bits
-    x2 = mulNumbers(x, x, sk, nBits, nBits*2)
-    x3 = mulNumbers(x2, x, sk, nBits, nBits*2)
+    x2 = mulNumbers(x, copy_cipher_bits(x), sk, nBits, nBits*2)
+    x3 = mulNumbers(x2, copy_cipher_bits(x), sk, nBits, nBits*2)
     half_x = mulNumbers(x, int_to_cipher_bits(64, nBits), sk, nBits, nBits*2)
     cubic_x = mulNumbers(x3, int_to_cipher_bits(26, nBits), sk, nBits, nBits*2)
     y = addNumbers(half_x, cubic_x, nBits)
@@ -143,7 +149,7 @@ def poly_exp(bits, nBits):
     # exp(x) ≈ 1 + x + 0.5x^2 (scale=128)
     one = int_to_cipher_bits(128, nBits)
     x = bits
-    x2 = mulNumbers(x, x, sk, nBits, nBits*2)
+    x2 = mulNumbers(x, copy_cipher_bits(x), sk, nBits, nBits*2)
     half_x2 = mulNumbers(x2, int_to_cipher_bits(64, nBits), sk, nBits, nBits*2)
     temp = addNumbers(one, x, nBits)
     return addNumbers(temp, half_x2, nBits)
@@ -153,6 +159,7 @@ def softmax_approx(enc_logits: List[List[Ciphertext]], nBits):
     sum_exp = exp_list[0]
     for i in range(1, len(exp_list)):
         sum_exp = addNumbers(sum_exp, exp_list[i], nBits)
+    # For demo, just return exp(x); normalization is expensive in FHE
     return exp_list
 
 # ----------------------- Layer Normalization ---------------------------------
@@ -171,9 +178,10 @@ def poly_layernorm(enc_vec, nBits):
     var_sum = [cc.Encrypt(sk, False) for _ in range(nBits)]
     for x in enc_vec:
         diff = subtractNumbers(x, mean, nBits)
-        diff2 = mulNumbers(diff, diff, sk, nBits, nBits*2)
+        diff2 = mulNumbers(diff, copy_cipher_bits(diff), sk, nBits, nBits*2)
         var_sum = addNumbers(var_sum, diff2, nBits)
     var = mulNumbers(var_sum, int_to_cipher_bits(int(128 // len(enc_vec)), nBits), sk, nBits, nBits*2)
+    # For demo, skip sqrt and division for normalization
     normed = [subtractNumbers(x, mean, nBits) for x in enc_vec]
     return normed
 
@@ -221,7 +229,7 @@ def main(sentence: str):
     # ---- Activation (GELU approx) ----
     y_bits_gelu = poly_gelu(y_bits, nbits)
 
-    # ---- Output as a vector  ----
+    # ---- Output as a vector for demo (simulate multi-class/logits) ----
     out_vec = [y_bits_gelu]
     for delta in [-32, 0, 32]:
         delta_bits = int_to_cipher_bits(delta, nbits)
