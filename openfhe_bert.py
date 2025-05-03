@@ -111,27 +111,9 @@ def cipher_bits_to_int(bits: List[Ciphertext]) -> int:
 # ----------------------- FHE ciphertext copy helper --------------------------
 
 def copy_cipher_bits(bits):
-    # Decrypt and re-encrypt to create independent ciphertexts
     return [cc.Encrypt(sk, int(cc.Decrypt(sk, b))) for b in bits]
 
-# ----------------------- Matrix Multiplication -------------------------------
-
-def matmul(enc_A, enc_B, nBits):
-    m, k, n = len(enc_A), len(enc_A[0]), len(enc_B[0])
-    enc_C = []
-    for i in range(m):
-        row = []
-        for j in range(n):
-            products = [mulNumbers(enc_A[i][l], enc_B[l][j], sk, nBits, nBits*2) for l in range(k)]
-            while len(products) > 1:
-                a = products.pop()
-                b = products.pop()
-                products.append(addNumbers(a, b, nBits))
-            row.append(products[0])
-        enc_C.append(row)
-    return enc_C
-
-# ----------------------- Polynomial Activation (GELU approx) -----------------
+# ----------------------- Activation Functions (Polynomial Approximations) ----
 
 def poly_gelu(bits, nBits):
     # GELU(x) ≈ 0.5x + 0.2x^3, fixed-point scale=128
@@ -142,6 +124,26 @@ def poly_gelu(bits, nBits):
     cubic_x = mulNumbers(x3, int_to_cipher_bits(26, nBits), sk, nBits, nBits*2)
     y = addNumbers(half_x, cubic_x, nBits)
     return y
+
+def poly_relu(bits, nBits):
+    # ReLU(x) ≈ max(0, x), but in FHE use x^2 as a simple HE-friendly activation (CryptoNets)
+    x = bits
+    x2 = mulNumbers(x, copy_cipher_bits(x), sk, nBits, nBits*2)
+    return x2
+
+def poly_sigmoid(bits, nBits):
+    # Sigmoid(x) ≈ 0.5 + 0.197x (linear approx for FHE)
+    half = int_to_cipher_bits(64, nBits)
+    approx = mulNumbers(bits, int_to_cipher_bits(25, nBits), sk, nBits, nBits*2)
+    return addNumbers(half, approx, nBits)
+
+def poly_tanh(bits, nBits):
+    # tanh(x) ≈ x - x^3/3 for small x, scale=128, 128/3 ≈ 43
+    x = bits
+    x2 = mulNumbers(x, copy_cipher_bits(x), sk, nBits, nBits*2)
+    x3 = mulNumbers(x2, copy_cipher_bits(x), sk, nBits, nBits*2)
+    third_x3 = mulNumbers(x3, int_to_cipher_bits(43, nBits), sk, nBits, nBits*2)
+    return subtractNumbers(x, third_x3, nBits)
 
 # ----------------------- Softmax Approximation -------------------------------
 
@@ -181,7 +183,6 @@ def poly_layernorm(enc_vec, nBits):
         diff2 = mulNumbers(diff, copy_cipher_bits(diff), sk, nBits, nBits*2)
         var_sum = addNumbers(var_sum, diff2, nBits)
     var = mulNumbers(var_sum, int_to_cipher_bits(int(128 // len(enc_vec)), nBits), sk, nBits, nBits*2)
-    # For demo, skip sqrt and division for normalization
     normed = [subtractNumbers(x, mean, nBits) for x in enc_vec]
     return normed
 
@@ -226,35 +227,42 @@ def main(sentence: str):
     y_bits = addNumbers(products[0], enc_b, nbits)
     enc_time = time.time() - t0
 
-    # ---- Activation (GELU approx) ----
-    y_bits_gelu = poly_gelu(y_bits, nbits)
+    # ---- Output as a vector (simulate multi-class/logits) ----
+    activations = {
+        "GELU": poly_gelu,
+        "ReLU": poly_relu,
+        "Sigmoid": poly_sigmoid,
+        "Tanh": poly_tanh
+    }
 
-    # ---- Output as a vector for demo (simulate multi-class/logits) ----
-    out_vec = [y_bits_gelu]
-    for delta in [-32, 0, 32]:
-        delta_bits = int_to_cipher_bits(delta, nbits)
-        out_vec.append(addNumbers(y_bits_gelu, delta_bits, nbits))
+    for name, act_fn in activations.items():
+        print(f"\n[INFO] Testing activation: {name}")
+        y_bits_act = act_fn(y_bits, nbits)
+        y_int = cipher_bits_to_int(y_bits_act)
+        y_float = y_int / (SCALE ** 2)
+        print(f"{name} output int: {y_int}")
+        print(f"{name} dequantised value: {y_float:.4f}")
+        print(f"{name} prediction: {'positive' if y_int > 0 else 'negative'}")
 
-    # ---- Softmax approximation ----
-    print("[INFO] Homomorphic softmax approximation…")
-    softmax_vec = softmax_approx(out_vec, nbits)
-    softmax_plain = [cipher_bits_to_int(bits) / (SCALE*2) for bits in softmax_vec]
-    print("Softmax approx outputs (dequantized):", softmax_plain)
+        # For demo, create a vector of outputs for softmax/layernorm
+        out_vec = [y_bits_act]
+        for delta in [-32, 0, 32]:
+            delta_bits = int_to_cipher_bits(delta, nbits)
+            out_vec.append(addNumbers(y_bits_act, delta_bits, nbits))
 
-    # ---- LayerNorm approximation ----
-    print("[INFO] Homomorphic layer normalization approximation…")
-    normed_vec = poly_layernorm(out_vec, nbits)
-    normed_plain = [cipher_bits_to_int(bits) / SCALE for bits in normed_vec]
-    print("LayerNorm approx outputs (dequantized):", normed_plain)
+        # ---- Softmax approximation ----
+        print("[INFO] Homomorphic softmax approximation…")
+        softmax_vec = softmax_approx(out_vec, nbits)
+        softmax_plain = [cipher_bits_to_int(bits) / (SCALE*2) for bits in softmax_vec]
+        print("Softmax approx outputs (dequantized):", softmax_plain)
 
-    # ---- Final output for classification ----
-    y_int = cipher_bits_to_int(y_bits_gelu)
-    y_float = y_int / (SCALE ** 2)
+        # ---- LayerNorm approximation ----
+        print("[INFO] Homomorphic layer normalization approximation…")
+        normed_vec = poly_layernorm(out_vec, nbits)
+        normed_plain = [cipher_bits_to_int(bits) / SCALE for bits in normed_vec]
+        print("LayerNorm approx outputs (dequantized):", normed_plain)
 
-    print(f"Encrypted output int : {y_int}")
-    print(f"De‑quantised value  : {y_float:.4f}")
-    print(f"Prediction          : {'positive' if y_int > 0 else 'negative'}")
-    print(f"FHE compute time    : {enc_time:.2f}s")
+    print(f"\nFHE compute time    : {enc_time:.2f}s")
 
 if __name__ == "__main__":
     sentence = " ".join(sys.argv[1:]) or "This is a test sentence."
